@@ -304,11 +304,28 @@ def _stream_response(client: httpx.AsyncClient, upstream_resp: httpx.Response,
             await upstream_resp.aclose()
             await client.aclose()
 
+    # Real bug, caught live the first time a genuinely-deployed app (not
+    # curl by hand) called this gateway: forwarding the raw upstream body
+    # bytes unmodified is only correct if the response's *headers* are
+    # forwarded too when they describe those bytes. Groq/Google/OpenRouter
+    # all gzip their responses -- without also forwarding content-encoding,
+    # a normal HTTP client (httpx, browsers, any OpenAI SDK) has no way to
+    # know to decompress before parsing JSON and gets garbage/a decode
+    # error. (Every earlier curl test in this repo's own history worked
+    # around this by hand with `| gunzip -c` -- that was masking this bug,
+    # not proof it didn't exist.) content-length is deliberately NOT
+    # forwarded -- StreamingResponse sends chunked transfer, a stale
+    # content-length header describing the ORIGINAL response would be
+    # actively wrong framing, not just redundant.
+    response_headers = dict(extra_headers or {})
+    if "content-encoding" in upstream_resp.headers:
+        response_headers["content-encoding"] = upstream_resp.headers["content-encoding"]
+
     return StreamingResponse(
         _stream_and_close(),
         status_code=upstream_resp.status_code,
         media_type=upstream_resp.headers.get("content-type"),
-        headers=extra_headers,
+        headers=response_headers or None,
     )
 
 

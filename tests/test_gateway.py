@@ -34,6 +34,14 @@ def _fake_response(status_code: int, body: dict) -> httpx.Response:
                            stream=_FakeUpstreamBody(json.dumps(body).encode()))
 
 
+def _fake_gzipped_response(status_code: int, body: dict) -> httpx.Response:
+    import gzip
+    compressed = gzip.compress(json.dumps(body).encode())
+    return httpx.Response(status_code,
+                           headers={"content-type": "application/json", "content-encoding": "gzip"},
+                           stream=_FakeUpstreamBody(compressed))
+
+
 @pytest.fixture(autouse=True)
 def _clean_provider_env(monkeypatch):
     for cfg in main.PROVIDERS.values():
@@ -357,3 +365,22 @@ def test_auto_returns_503_when_every_candidate_fails(monkeypatch):
 
     assert r.status_code == 503
     assert set(r.json()["detail"]["attempted_and_failed"]) == {"groq", "google"}
+
+def test_gzipped_upstream_response_content_encoding_is_forwarded(monkeypatch):
+    """Regression test: forwarding gzip-compressed body bytes without also
+    forwarding the content-encoding header meant every real client (httpx,
+    any OpenAI SDK) got garbage instead of JSON -- confirmed live the
+    first time a genuinely deployed app (not curl with a manual
+    `| gunzip -c` workaround) called this gateway."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_gzipped_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)  # httpx's TestClient auto-decompresses when asked
+    r = client.post("/groq/v1/chat/completions", json={}, headers={"Accept-Encoding": "gzip"})
+
+    assert r.status_code == 200
+    assert r.headers.get("content-encoding") == "gzip"
+    assert r.json() == {"ok": True}
