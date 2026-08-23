@@ -6,6 +6,12 @@ gateway's internal address plus the provider it wants
 (http://<gateway>:8080/groq/v1, /together/v1, /google/v1) and gets
 transparent proxying + auth injection, streaming included.
 
+xAI (Grok) was tried and deliberately removed -- it has no free tier,
+pay-as-you-go credits required at console.x.ai, doesn't fit this
+platform's "genuinely free" ideology for auxiliary AI compute. Groq (a
+different company, confusingly similar name) is the one that's actually
+free -- see README for recommended models.
+
 Never exposed outside the platform's internal Docker network -- no public
 domain, no Cloudflare Tunnel route (removed manually after the initial
 deploy, since zorc's deploy() has no "internal-only" concept yet).
@@ -55,12 +61,6 @@ PROVIDERS = {
         # GOOGLE_AI_STUDIO_API_KEY is set; adjust here if not.
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GOOGLE_AI_STUDIO_API_KEY",
-        "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
-    },
-    "xai": {
-        # Grok, OpenAI-compatible API.
-        "base_url": "https://api.x.ai/v1",
-        "api_key_env": "XAI_API_KEY",
         "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
     },
 }

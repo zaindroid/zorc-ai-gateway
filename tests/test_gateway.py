@@ -64,7 +64,6 @@ def test_providers_reflects_which_keys_are_set(monkeypatch):
     assert status["groq"] is True
     assert status["together"] is False
     assert status["google"] is False
-    assert status["xai"] is False
 
 
 def test_unknown_provider_404s():
@@ -113,7 +112,6 @@ def test_upstream_url_matches_each_providers_real_endpoint(monkeypatch):
         "groq": "https://api.groq.com/openai/v1/chat/completions",
         "together": "https://api.together.xyz/v1/chat/completions",
         "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "xai": "https://api.x.ai/v1/chat/completions",
     }
     for provider, expected_url in expected.items():
         monkeypatch.setenv(main.PROVIDERS[provider]["api_key_env"], "test-key")

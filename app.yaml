@@ -1,5 +1,5 @@
 name: ai-gateway
-description: Internal OpenAI-compatible proxy to free-tier AI providers (Groq, Together AI, Google AI Studio, xAI Grok) -- holds real provider keys so no other app on the platform needs to see or handle one directly.
+description: Internal OpenAI-compatible proxy to free-tier AI providers (Groq, Together AI, Google AI Studio) -- holds real provider keys so no other app on the platform needs to see or handle one directly.
 owner: zainey
 
 runtime:
@@ -29,7 +29,7 @@ health:
   path: /health
 
 # Deliberately no env: section for the provider keys (GROQ_API_KEY,
-# TOGETHER_API_KEY, GOOGLE_AI_STUDIO_API_KEY, XAI_API_KEY) -- app.yaml's env schema
+# TOGETHER_API_KEY, GOOGLE_AI_STUDIO_API_KEY) -- app.yaml's env schema
 # only supports "generate: hex" (server-generated) or "required: true"
 # (caller must supply at deploy time, blocking deploy without it). None
 # of those fit "ship now, wire real keys in as a deliberate follow-up
