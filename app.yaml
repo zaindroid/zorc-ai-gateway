@@ -23,7 +23,7 @@ dependencies:
 
 provides:
   - id: ai-gateway
-    operations: [POST /{provider}/v1/chat/completions, GET /providers]
+    operations: ["POST /{provider}/v1/chat/completions", "GET /providers"]
 
 health:
   path: /health
