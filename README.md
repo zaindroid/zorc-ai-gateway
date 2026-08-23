@@ -91,13 +91,31 @@ Add one entry to `PROVIDERS` in `main.py` (upstream base URL, the env var
 name for its key, how the key gets attached to the request) -- no other
 code changes needed, the proxy route itself is entirely table-driven.
 
-## Google AI Studio note
+## Google AI Studio: free-tier enforcement
 
-`google`'s base URL points at Gemini's documented OpenAI-compatibility
-endpoint. This has NOT been verified against a real key/live request yet
-(no `GOOGLE_AI_STUDIO_API_KEY` configured as of this writing) -- confirm
-it once that key is wired in, and adjust `PROVIDERS["google"]["base_url"]`
-if it doesn't match.
+`google` is the one provider where staying free actually matters (Groq's
+free tier is generous and unlimited-in-practice for this use case;
+Together isn't wired yet) -- so it's the only provider with a
+self-imposed rate limit, two layers deep:
+
+1. **The real guarantee**: per Google's own docs
+   (ai.google.dev/gemini-api/docs/billing), an API key whose underlying
+   Cloud project has no linked Cloud Billing account cannot be charged,
+   full stop -- exceeding free quota there only ever produces a 429, no
+   bill. Confirm billing is NOT linked on this key's project; that's what
+   actually makes overspend structurally impossible, not anything in this
+   repo.
+2. **This gateway's own limiter**, as a second layer so a runaway caller
+   gets a clean local cutoff instead of hammering Google with requests
+   that would fail anyway: `rpm_limit`/`rpd_limit` on the `google` entry
+   in `PROVIDERS` (defaults 8/min, 200/day -- deliberately conservative,
+   configurable via `GOOGLE_RPM_LIMIT`/`GOOGLE_RPD_LIMIT` env vars). Once
+   hit, the gateway returns `429` itself and never forwards the request.
+   `GET /usage` reports current usage against both limits.
+
+Check your actual current limit at
+[aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit)
+and raise the env vars if 8/200 is too strict for your model/tier.
 
 ## Build: nixpacks, not a Dockerfile
 

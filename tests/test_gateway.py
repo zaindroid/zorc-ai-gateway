@@ -39,6 +39,16 @@ def _clean_provider_env(monkeypatch):
         monkeypatch.delenv(cfg["api_key_env"], raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _clean_usage_state():
+    # _usage is module-level (deliberately -- see main.py's comment on why
+    # a single-replica gateway is fine tracking this in-memory), so it
+    # persists across tests unless reset here.
+    main._usage.clear()
+    yield
+    main._usage.clear()
+
+
 def test_health_never_touches_upstream():
     client = TestClient(main.app)
     r = client.get("/health")
@@ -143,3 +153,72 @@ def test_caller_cannot_override_which_key_gets_used(monkeypatch):
     client.post("/groq/v1/chat/completions", json={}, headers={"Authorization": "Bearer attacker-supplied"})
 
     assert captured["headers"]["authorization"] == "Bearer sk-real-test-key"
+
+def test_google_rpm_limit_enforced(monkeypatch):
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpm_limit", 2)
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpd_limit", None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+
+    assert client.post("/google/v1/chat/completions", json={}).status_code == 200
+    assert client.post("/google/v1/chat/completions", json={}).status_code == 200
+    r = client.post("/google/v1/chat/completions", json={})
+    assert r.status_code == 429
+    assert "rate limit" in r.json()["detail"]
+    # The upstream must never even be called for the request that got cut off.
+
+
+def test_google_rpd_limit_enforced(monkeypatch):
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpm_limit", None)
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpd_limit", 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+
+    assert client.post("/google/v1/chat/completions", json={}).status_code == 200
+    r = client.post("/google/v1/chat/completions", json={})
+    assert r.status_code == 429
+    assert "daily free-tier budget exhausted" in r.json()["detail"]
+
+
+def test_groq_has_no_self_imposed_rate_limit(monkeypatch):
+    """groq isn't rate-limited by this gateway -- it's the actually-free
+    provider, no artificial cap needed on top of Groq's own generous
+    free tier."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    for _ in range(20):
+        assert client.post("/groq/v1/chat/completions", json={}).status_code == 200
+
+
+def test_usage_endpoint_reports_only_rate_limited_providers(monkeypatch):
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpm_limit", 8)
+    monkeypatch.setitem(main.PROVIDERS["google"], "rpd_limit", 200)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    client.post("/google/v1/chat/completions", json={})
+
+    usage = client.get("/usage").json()
+    assert usage == {"google": {"rpm_used": 1, "rpm_limit": 8, "rpd_used": 1, "rpd_limit": 200}}
+    # groq/together aren't rate-limited -- shouldn't appear at all.
+    assert "groq" not in usage
+    assert "together" not in usage

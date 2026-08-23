@@ -22,8 +22,23 @@ weaker than existing convention, consistent with it.
 A provider with no key configured yet (deliberate -- this ships before
 real keys are wired in, see README) returns a clear 503, never a silent
 failure or a request forwarded with a missing/empty Authorization header.
+
+A provider can optionally declare rpm_limit/rpd_limit in PROVIDERS below
+(google does, as of 2026-08-23) -- self-imposed request-rate caps the
+gateway enforces BEFORE ever forwarding to the upstream, on top of
+whatever quota that provider enforces on its own. This is deliberately
+a second, independent layer, not a replacement for the real guarantee:
+per Google's own docs (ai.google.dev/gemini-api/docs/billing), an API
+key whose underlying Cloud project has no linked billing account cannot
+be charged at all -- exceeding free quota there only ever produces a 429,
+never a bill. Confirm that's still true for this specific key's project
+before relying on it. This gateway's own limiter exists so a runaway
+caller gets a clean, immediate, self-hosted cutoff instead of spamming
+Google with requests that would fail anyway once its own quota is hit.
 """
 import os
+import time
+from collections import deque
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -55,15 +70,60 @@ PROVIDERS = {
         "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
     },
     "google": {
-        # Gemini's documented OpenAI-compatibility layer -- NOT yet
-        # verified against a real key/live request (no key wired in as
-        # of this writing). Confirm this exact base path works once
-        # GOOGLE_AI_STUDIO_API_KEY is set; adjust here if not.
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GOOGLE_AI_STUDIO_API_KEY",
         "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
+        # Deliberately conservative, well under every published free-tier
+        # number for Gemini's flash-family models (which range roughly
+        # 10-15 RPM / 200-1500 RPD depending on model and change over
+        # time) -- the goal here is a comfortable safety margin, not a
+        # tight match to Google's exact current limit. Check your real
+        # limit at https://aistudio.google.com/rate-limit and raise these
+        # via GOOGLE_RPM_LIMIT/GOOGLE_RPD_LIMIT if 8/200 is too strict.
+        "rpm_limit": int(os.environ.get("GOOGLE_RPM_LIMIT", "8")),
+        "rpd_limit": int(os.environ.get("GOOGLE_RPD_LIMIT", "200")),
     },
 }
+
+# provider name -> deque[float] of unix timestamps for calls the gateway
+# has allowed through, used to enforce rpm_limit/rpd_limit above. In-memory
+# only (this app runs as a single replica, see app.yaml) -- resets on
+# restart/redeploy, which is fine: losing a partial day's count on a rare
+# restart is a much smaller risk than the thing being guarded against.
+_usage: dict[str, deque[float]] = {}
+
+
+def _check_and_reserve_rate_limit(provider: str, cfg: dict) -> None:
+    """Raises 429 if this call would exceed provider's rpm_limit/rpd_limit;
+    otherwise reserves the slot immediately (counts it right away, not
+    after the upstream call succeeds) -- simplest correct behavior for a
+    single-process gateway with no concurrency to race against, and it
+    means a burst of calls right at the boundary can only ever undercount
+    (a call that fails upstream for an unrelated reason still "spent" its
+    reserved slot) rather than overshoot the cap."""
+    rpm_limit = cfg.get("rpm_limit")
+    rpd_limit = cfg.get("rpd_limit")
+    if not rpm_limit and not rpd_limit:
+        return
+
+    now = time.time()
+    dq = _usage.setdefault(provider, deque())
+    while dq and dq[0] < now - 86400:
+        dq.popleft()
+
+    if rpd_limit and len(dq) >= rpd_limit:
+        raise HTTPException(429, f"{provider!r} daily free-tier budget exhausted "
+                                   f"({rpd_limit}/day, self-imposed) -- see GET /usage; "
+                                   "resets on a rolling 24h window")
+
+    if rpm_limit:
+        recent = sum(1 for t in dq if t > now - 60)
+        if recent >= rpm_limit:
+            raise HTTPException(429, f"{provider!r} rate limit hit "
+                                       f"({rpm_limit}/min, self-imposed) -- see GET /usage; "
+                                       "retry in a few seconds")
+
+    dq.append(now)
 
 
 def provider_status() -> dict[str, bool]:
@@ -95,6 +155,29 @@ async def providers():
     return provider_status()
 
 
+@app.get("/usage")
+async def usage():
+    """Current self-imposed rate-limit usage for every provider that
+    declares rpm_limit/rpd_limit in PROVIDERS -- the "strictly monitor"
+    half of free-tier enforcement (the other half is this gateway
+    refusing to forward once a limit is hit, see proxy())."""
+    now = time.time()
+    result = {}
+    for name, cfg in PROVIDERS.items():
+        rpm_limit = cfg.get("rpm_limit")
+        rpd_limit = cfg.get("rpd_limit")
+        if not rpm_limit and not rpd_limit:
+            continue
+        dq = _usage.get(name, deque())
+        result[name] = {
+            "rpm_used": sum(1 for t in dq if t > now - 60),
+            "rpm_limit": rpm_limit,
+            "rpd_used": sum(1 for t in dq if t > now - 86400),
+            "rpd_limit": rpd_limit,
+        }
+    return result
+
+
 @app.get("/openapi.json")
 async def openapi_json():
     return app.openapi()
@@ -110,6 +193,8 @@ async def proxy(provider: str, path: str, request: Request):
     if not key:
         raise HTTPException(503, f"provider {provider!r} has no API key configured yet -- "
                                    "see GET /providers for current status")
+
+    _check_and_reserve_rate_limit(provider, cfg)
 
     # Every base_url above already ends in that provider's own real API
     # root (including its version marker, e.g. ".../openai/v1" for groq,
