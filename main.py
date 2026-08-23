@@ -111,7 +111,23 @@ async def proxy(provider: str, path: str, request: Request):
         raise HTTPException(503, f"provider {provider!r} has no API key configured yet -- "
                                    "see GET /providers for current status")
 
-    upstream_url = f"{cfg['base_url']}/{path}"
+    # Every base_url above already ends in that provider's own real API
+    # root (including its version marker, e.g. ".../openai/v1" for groq,
+    # ".../v1beta/openai" for google) -- and a caller pointing an
+    # OpenAI-SDK-style client's base_url at this gateway (base_url =
+    # "http://gateway/<provider>/v1", matching openai-python's own
+    # convention of baking "/v1" into base_url rather than adding it per
+    # call) will always have "v1/..." as the leading segment of `path`
+    # too. Concatenating both unmodified doubles the version segment
+    # (".../openai/v1/v1/chat/completions"), which 404s against the real
+    # upstream -- confirmed live against the real xAI API the first time
+    # any provider here was ever exercised end-to-end with a real key
+    # (every prior test used a mock and only asserted internal
+    # self-consistency, never a real upstream). Stripping exactly one
+    # leading "v1/" segment here is what makes the constructed URL match
+    # each provider's actual documented endpoint.
+    forward_path = path[3:] if path.startswith("v1/") else path
+    upstream_url = f"{cfg['base_url']}/{forward_path}"
     headers = dict(cfg["auth_header"](key))
     if "content-type" in request.headers:
         headers["Content-Type"] = request.headers["content-type"]

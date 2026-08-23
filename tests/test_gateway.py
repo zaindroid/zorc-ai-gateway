@@ -97,10 +97,36 @@ def test_configured_provider_proxies_and_injects_auth(monkeypatch):
 
     assert r.status_code == 200
     assert r.json() == {"ok": True}
-    assert captured_request["url"] == "https://api.groq.com/openai/v1/v1/chat/completions"
+    assert captured_request["url"] == "https://api.groq.com/openai/v1/chat/completions"
     assert captured_request["headers"]["authorization"] == "Bearer sk-real-test-key"
     # The real key must never leak back to the caller in any response header/body.
     assert "sk-real-test-key" not in r.text
+
+
+def test_upstream_url_matches_each_providers_real_endpoint(monkeypatch):
+    """Regression test: base_url + the caller's path used to double up the
+    "v1" segment (".../openai/v1/v1/chat/completions"), which 404s against
+    every real provider -- confirmed live the first time any provider was
+    exercised with a real key (all prior tests only asserted internal
+    self-consistency against a mock, never a real endpoint shape)."""
+    expected = {
+        "groq": "https://api.groq.com/openai/v1/chat/completions",
+        "together": "https://api.together.xyz/v1/chat/completions",
+        "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "xai": "https://api.x.ai/v1/chat/completions",
+    }
+    for provider, expected_url in expected.items():
+        monkeypatch.setenv(main.PROVIDERS[provider]["api_key_env"], "test-key")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return _fake_response(200, {"ok": True})
+
+        monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+        client = TestClient(main.app)
+        client.post(f"/{provider}/v1/chat/completions", json={})
+        assert captured["url"] == expected_url
 
 
 def test_caller_cannot_override_which_key_gets_used(monkeypatch):
