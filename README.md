@@ -64,3 +64,21 @@ endpoint. This has NOT been verified against a real key/live request yet
 (no `GOOGLE_AI_STUDIO_API_KEY` configured as of this writing) -- confirm
 it once that key is wired in, and adjust `PROVIDERS["google"]["base_url"]`
 if it doesn't match.
+
+## Build: nixpacks, not a Dockerfile
+
+This repo has `requirements.txt` at its root, which zorc's `classify()`
+treats as a recognized manifest -- per this platform's own convention
+(AGENTS.md §3: "Dockerfile only if build-autodetection can't handle your
+stack"), that means Coolify builds this app via nixpacks auto-detection,
+NOT a hand-written Dockerfile, even if one existed in the repo. A real,
+hand-written Dockerfile was tried first and silently ignored (confirmed
+live: classify() picks the manifest over Dockerfile whenever both exist,
+so it was always going to be dead code) -- removed rather than left
+around as confusing, unused weight.
+
+`Procfile`'s `web:` line is what tells nixpacks how to actually start
+this app (`uvicorn main:app --host 0.0.0.0 --port $PORT`) -- without it,
+nixpacks has no reliable way to guess that a FastAPI app should be
+started with uvicorn, and the container exits immediately on deploy
+(confirmed live: this exact failure, before the Procfile was added).

@@ -1,15 +1,18 @@
 # .github/workflows/ci.yml
 #
 # DELIBERATE DEVIATION from templates/app-template's ci.yml, not a copy
-# of it: that template is Node/npm-specific (this app is Python/FastAPI)
-# and its staging/production promotion steps trigger Coolify via GitHub
-# Actions webhook secrets (COOLIFY_STAGING_WEBHOOK etc.) -- that's not how
-# deploys actually happen on this platform; zorc's own deploy/agent.py
-# calls the Coolify API directly, no GitHub Actions involved at any point.
-# Kept here: the same 4 static/unit/integration/container gates in
-# spirit, adapted for this app's real stack and real deploy mechanism.
-# Gate 3 (integration) is a no-op here -- this app has no database/queue
-# to integration-test against, it's a stateless proxy.
+# of it: that template is Node/npm-specific (this app is Python/FastAPI),
+# builds/smoke-tests a Dockerfile (this app deploys via nixpacks, see
+# README's "Build: nixpacks, not a Dockerfile" -- no Dockerfile exists in
+# this repo at all, so a container-build gate would test something
+# different from what actually gets deployed), and its staging/production
+# promotion steps trigger Coolify via GitHub Actions webhook secrets --
+# that's not how deploys actually happen on this platform; zorc's own
+# deploy/agent.py calls the Coolify API directly, no GitHub Actions
+# involved at any point. Kept here: gates 1-2 (static, unit) in the same
+# spirit, adapted for this app's real stack. No container/staging/
+# production gates -- there's nothing meaningful for this workflow to
+# build or promote that matches the real deploy path.
 
 name: ci
 
@@ -17,10 +20,6 @@ on:
   push:
     branches: [main]
   pull_request:
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
 
@@ -42,6 +41,9 @@ jobs:
             [sys.exit(f'app.yaml missing {k}') for k in \
              ('name','runtime','domains','health') if k not in d]"
 
+      - name: Validate Procfile exists (nixpacks needs it to start this app)
+        run: test -f Procfile || { echo "Procfile missing — nixpacks won't know how to start this app"; exit 1; }
+
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install -r requirements.txt ruff
@@ -61,56 +63,4 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/ -v
 
-  # ---------------------------------------------------------------- gate 4
-  container:
-    needs: unit
-    runs-on: ubuntu-latest
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          push: ${{ github.ref == 'refs/heads/main' }}
-          load:  ${{ github.ref != 'refs/heads/main' }}
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-
-      - name: Smoke test the built image
-        run: |
-          docker run -d --name smoke -p 8080:8080 ${{ env.IMAGE }}:${{ github.sha }}
-
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/health; then ok=1; break; fi
-            sleep 1
-          done
-          [ "$ok" = 1 ] || { echo "health check never passed"; docker logs smoke; exit 1; }
-
-          echo "--- version endpoint"
-          curl -fsS http://localhost:8080/version | tee /tmp/v.json
-          grep -q "${GITHUB_SHA:0:7}" /tmp/v.json || { echo "SHA mismatch"; exit 1; }
-
-          echo "--- must not run as root"
-          [ "$(docker exec smoke id -u)" != "0" ] || { echo "container runs as root"; exit 1; }
-
-          echo "--- image size"
-          size=$(docker image inspect ${{ env.IMAGE }}:${{ github.sha }} --format '{{.Size}}')
-          [ "$size" -lt 524288000 ] || { echo "image over 500MB: $size"; exit 1; }
-
-          docker rm -f smoke
-
-# No staging/production promotion jobs -- deploys on this platform go
-# through zorc's own deploy()/redeploy() MCP tools (deploy/agent.py),
-# triggered by a human or agent explicitly, not by this workflow.
+# No container/staging/production gates -- see this file's header comment.
