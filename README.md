@@ -41,8 +41,12 @@ endpoint for the current list, Groq's free catalog changes over time):
   visible answer, so a very small `max_tokens` (e.g. 10) can come back
   empty -- confirmed live. Give it real headroom (200+) for actual use.
 - **`qwen/qwen3.6-27b`** -- lighter/faster alternative, same feature set
-  (tools, JSON mode, reasoning) plus image input, smaller context (still
-  131k) and lower latency. Good default when `gpt-oss-120b` is overkill.
+  (tools, JSON mode, reasoning) plus image input, smaller max output
+  (16k vs 65k) but same 131k context. Also a thinking model -- confirmed
+  live it emits its `<think>...</think>` reasoning inline in `content`
+  (not a separate field the way gpt-oss's `reasoning` field is), so give
+  it real `max_tokens` headroom too or the visible answer gets cut off
+  mid-thought.
 - **`groq/compound`** / **`groq/compound-mini`** -- Groq's own agentic
   models (built-in web search / code execution), useful when an app
   needs an agent loop rather than a plain chat completion.
