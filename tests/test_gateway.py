@@ -1,8 +1,10 @@
 """Unit tests for main.py -- no real network calls to any provider.
 main.HTTP_TRANSPORT is swapped for an httpx.MockTransport per-test (see
 that module's own comment on why a hand-built httpx.Response alone isn't
-enough), so these never depend on (or spend) real Groq/Together/Google
-quota."""
+enough), so these never depend on (or spend) real Groq/Together/Google/
+OpenRouter quota."""
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -28,7 +30,6 @@ class _FakeUpstreamBody(httpx.AsyncByteStream):
 
 
 def _fake_response(status_code: int, body: dict) -> httpx.Response:
-    import json
     return httpx.Response(status_code, headers={"content-type": "application/json"},
                            stream=_FakeUpstreamBody(json.dumps(body).encode()))
 
@@ -40,13 +41,15 @@ def _clean_provider_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _clean_usage_state():
-    # _usage is module-level (deliberately -- see main.py's comment on why
-    # a single-replica gateway is fine tracking this in-memory), so it
-    # persists across tests unless reset here.
+def _clean_usage_and_cooldown_state():
+    # _usage and _cooldown_until are module-level (deliberately -- see
+    # main.py's comment on why a single-replica gateway is fine tracking
+    # this in-memory), so they persist across tests unless reset here.
     main._usage.clear()
+    main._cooldown_until.clear()
     yield
     main._usage.clear()
+    main._cooldown_until.clear()
 
 
 def test_health_never_touches_upstream():
@@ -74,6 +77,7 @@ def test_providers_reflects_which_keys_are_set(monkeypatch):
     assert status["groq"] is True
     assert status["together"] is False
     assert status["google"] is False
+    assert status["openrouter"] is False
 
 
 def test_unknown_provider_404s():
@@ -122,6 +126,7 @@ def test_upstream_url_matches_each_providers_real_endpoint(monkeypatch):
         "groq": "https://api.groq.com/openai/v1/chat/completions",
         "together": "https://api.together.xyz/v1/chat/completions",
         "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "openrouter": "https://openrouter.ai/api/v1/chat/completions",
     }
     for provider, expected_url in expected.items():
         monkeypatch.setenv(main.PROVIDERS[provider]["api_key_env"], "test-key")
@@ -153,6 +158,7 @@ def test_caller_cannot_override_which_key_gets_used(monkeypatch):
     client.post("/groq/v1/chat/completions", json={}, headers={"Authorization": "Bearer attacker-supplied"})
 
     assert captured["headers"]["authorization"] == "Bearer sk-real-test-key"
+
 
 def test_google_rpm_limit_enforced(monkeypatch):
     monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
@@ -209,6 +215,8 @@ def test_usage_endpoint_reports_only_rate_limited_providers(monkeypatch):
     monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
     monkeypatch.setitem(main.PROVIDERS["google"], "rpm_limit", 8)
     monkeypatch.setitem(main.PROVIDERS["google"], "rpd_limit", 200)
+    monkeypatch.setitem(main.PROVIDERS["openrouter"], "rpm_limit", None)
+    monkeypatch.setitem(main.PROVIDERS["openrouter"], "rpd_limit", None)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return _fake_response(200, {"ok": True})
@@ -219,6 +227,133 @@ def test_usage_endpoint_reports_only_rate_limited_providers(monkeypatch):
 
     usage = client.get("/usage").json()
     assert usage == {"google": {"rpm_used": 1, "rpm_limit": 8, "rpd_used": 1, "rpd_limit": 200}}
-    # groq/together aren't rate-limited -- shouldn't appear at all.
+    # groq/together/openrouter (this test disabled its limit above) aren't
+    # rate-limited right now -- shouldn't appear at all.
     assert "groq" not in usage
     assert "together" not in usage
+    assert "openrouter" not in usage
+
+
+# --------------------------------------------------------------- /auto ----
+
+def test_auto_status_reports_every_candidate_in_rotation_order(monkeypatch):
+    client = TestClient(main.app)
+    status = client.get("/auto/status").json()
+    assert list(status.keys()) == main.ROTATION_ORDER
+    for name in main.ROTATION_ORDER:
+        assert status[name]["has_key"] is False
+        assert status[name]["eligible"] is False
+
+
+def test_auto_uses_first_eligible_provider_and_substitutes_its_default_model(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    r = client.post("/auto/v1/chat/completions",
+                     json={"model": "whatever-the-caller-typed", "messages": []})
+
+    assert r.status_code == 200
+    assert r.headers["x-gateway-provider"] == "groq"
+    assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    # The caller's model is ignored -- groq's own default_model is used.
+    assert captured["body"]["model"] == main.PROVIDERS["groq"]["default_model"]
+
+
+def test_auto_skips_provider_with_no_key(monkeypatch):
+    # groq has no key; google does -- /auto should land on google.
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    r = client.post("/auto/v1/chat/completions", json={"messages": []})
+
+    assert r.status_code == 200
+    assert r.headers["x-gateway-provider"] == "google"
+
+
+def test_auto_fails_over_on_429_and_marks_cooldown(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "google-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "groq" in str(request.url):
+            return _fake_response(429, {"error": "rate limited upstream"})
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    r = client.post("/auto/v1/chat/completions", json={"messages": []})
+
+    assert r.status_code == 200
+    assert r.headers["x-gateway-provider"] == "google"
+    assert main._in_cooldown("groq") is True
+
+    # A second call, moments later, must skip groq entirely (still cooling
+    # down) and go straight to google again -- this is the "user never
+    # sees downtime" behavior: no repeated failed attempt against groq.
+    calls_to_groq = []
+
+    def handler2(request: httpx.Request) -> httpx.Response:
+        if "groq" in str(request.url):
+            calls_to_groq.append(1)
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler2))
+    r2 = client.post("/auto/v1/chat/completions", json={"messages": []})
+    assert r2.status_code == 200
+    assert r2.headers["x-gateway-provider"] == "google"
+    assert calls_to_groq == []
+
+
+def test_auto_does_not_fail_over_on_ordinary_client_error(monkeypatch):
+    """A plain 400 (bad request, wrong params, etc.) means the request
+    itself is broken -- retrying against a different provider wouldn't
+    fix it and would just hide the real error. Only quota/availability
+    signals (429/402/403) should trigger failover."""
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "google-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(400, {"error": "bad request"})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    r = client.post("/auto/v1/chat/completions", json={"messages": []})
+
+    assert r.status_code == 400
+    assert r.headers["x-gateway-provider"] == "groq"
+    assert main._in_cooldown("groq") is False
+
+
+def test_auto_returns_503_when_nothing_is_eligible():
+    client = TestClient(main.app)  # no keys configured at all
+    r = client.post("/auto/v1/chat/completions", json={"messages": []})
+    assert r.status_code == 503
+    assert r.json()["detail"]["attempted_and_failed"] == []
+    assert set(r.json()["detail"]["status"].keys()) == set(main.ROTATION_ORDER)
+
+
+def test_auto_returns_503_when_every_candidate_fails(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "google-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _fake_response(429, {"error": "rate limited upstream"})
+
+    monkeypatch.setattr(main, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    client = TestClient(main.app)
+    r = client.post("/auto/v1/chat/completions", json={"messages": []})
+
+    assert r.status_code == 503
+    assert set(r.json()["detail"]["attempted_and_failed"]) == {"groq", "google"}

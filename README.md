@@ -1,9 +1,10 @@
 # zorc-ai-gateway
 
 Internal OpenAI-compatible reverse proxy to free-tier AI providers
-(Groq, Together AI, Google AI Studio). Holds the real provider API keys
-so no other app on the zorc platform ever needs to see or handle one
-directly.
+(Groq, Together AI, Google AI Studio, OpenRouter). Holds the real
+provider API keys so no other app on the zorc platform ever needs to see
+or handle one directly. Also does smart auto-failover across them --
+see "Auto-routing" below.
 
 xAI (Grok) was tried and deliberately removed -- pay-as-you-go only, no
 free tier, doesn't fit this gateway's "genuinely free" purpose. Groq (a
@@ -20,6 +21,7 @@ wants:
 http://<gateway internal address>:8080/groq/v1/chat/completions
 http://<gateway internal address>:8080/together/v1/chat/completions
 http://<gateway internal address>:8080/google/v1/chat/completions
+http://<gateway internal address>:8080/openrouter/v1/chat/completions
 ```
 
 The gateway injects the real `Authorization` header for that provider
@@ -54,6 +56,40 @@ endpoint for the current list, Groq's free catalog changes over time):
 Whisper (`whisper-large-v3`, `whisper-large-v3-turbo`) is available too,
 for audio transcription rather than chat.
 
+## Auto-routing (POST /auto/v1/chat/completions)
+
+For a caller that just wants a free chat completion and doesn't care
+which provider serves it: point your OpenAI client's base_url at
+`.../auto/v1` instead of `.../groq/v1` etc. The gateway tries providers
+in `ROTATION_ORDER` (currently `groq -> google -> openrouter -> together`,
+ordered by how generous/reliable each has actually proven live), skipping
+any that has no key configured, is rate-limited right now (self-imposed
+or its own quota), or is in a short cooldown from a recent failure.
+
+- Whatever `model` you send is **ignored** -- each candidate substitutes
+  its own `default_model` from `PROVIDERS`. If you care about an exact
+  model, call that provider's direct route instead; /auto is for "just
+  give me a free completion."
+- Only genuine availability signals trigger moving to the next candidate:
+  a `429`/`402`/`403` from the upstream, or a network-level failure.
+  An ordinary error (bad request, unsupported param) is returned as-is
+  immediately -- failing over on that would silently hide a real bug.
+- A provider that just failed is skipped (not retried) for
+  `COOLDOWN_SECONDS` (120s) -- so a struggling provider doesn't get
+  hammered by every subsequent /auto call while it's down.
+- A successful response carries `X-Gateway-Provider: <name>` so you can
+  see which one actually served it.
+- `GET /auto/status` reports live eligibility (`has_key`, `cooling_down`,
+  `rate_limit_available`, `eligible`) for every candidate, in rotation
+  order -- the "keep track of which provider is available" piece.
+- If every candidate is unavailable, you get one clean `503` listing what
+  was tried and the full status of each candidate -- not a silent hang or
+  a confusing upstream error from whichever one happened to be tried last.
+
+Direct `/{provider}/...` routes are completely unaffected by any of this
+-- they always attempt the real call with the model you actually sent,
+exactly as before /auto existed.
+
 ## Trust boundary
 
 **This app is never publicly reachable.** It's deployed via zorc's normal
@@ -73,23 +109,38 @@ key, or mark them `required: true`, which would block deployment until
 all three are ready). Instead:
 
 - The app reads `GROQ_API_KEY` / `TOGETHER_API_KEY` /
-  `GOOGLE_AI_STUDIO_API_KEY` from the environment directly, treating an
-  unset one as "not configured yet" -- that provider's routes return a
-  clean `503`, every other provider keeps working.
+  `GOOGLE_AI_STUDIO_API_KEY` / `OPENROUTER_API_KEY` from the environment
+  directly, treating an unset one as "not configured yet" -- that
+  provider's routes return a clean `503`, every other provider keeps
+  working (and /auto just skips it).
 - `GET /providers` reports which ones currently have a real key set.
 - Wiring a key in is `set_coolify_env_vars(coolify_uuid, {KEY: value})`
   followed by `redeploy()` -- a plain restart does NOT pick up a new env
   var, the container has to be recreated (same rule as a memory-limit
   change). Not yet a standalone zorc tool.
-- `GROQ_API_KEY` is wired and confirmed working end-to-end (real
-  `openai/gpt-oss-120b` chat completion through this gateway, 2026-08-23).
-  `TOGETHER_API_KEY` / `GOOGLE_AI_STUDIO_API_KEY` are not set yet.
+- `GROQ_API_KEY`, `GOOGLE_AI_STUDIO_API_KEY`, and `OPENROUTER_API_KEY`
+  are all wired and confirmed working end-to-end (real chat completions
+  through this gateway, 2026-08-23). `TOGETHER_API_KEY` is not set yet
+  (still a valid /auto candidate, it's just skipped until it has a key).
 
 ## Adding a provider
 
 Add one entry to `PROVIDERS` in `main.py` (upstream base URL, the env var
 name for its key, how the key gets attached to the request) -- no other
 code changes needed, the proxy route itself is entirely table-driven.
+
+## OpenRouter: models + free-tier enforcement
+
+`meta-llama/llama-3.3-70b-instruct:free` is the default -- confirm it's
+still in OpenRouter's free catalog via `GET /openrouter/v1/models`
+(filter for `":free"` model ids), the free lineup rotates. Like `google`,
+it's rate-limited by this gateway (`rpm_limit`/`rpd_limit` on the
+`openrouter` entry in `PROVIDERS`, defaults 20/min & 50/day --
+OpenRouter's own documented unfunded-account limits, raise
+`OPENROUTER_RPD_LIMIT` to 1000 if this key's account has ever purchased
+$10+ in credits). Free-model requests cost $0 even unfunded -- no
+billing-account guarantee needed here the way Google's is, OpenRouter
+just rejects with a quota error past the free limit.
 
 ## Google AI Studio: models + free-tier enforcement
 
