@@ -120,10 +120,13 @@ PROVIDERS = {
         "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
         # OpenRouter's free (":free"-suffixed) models -- confirm this
         # specific one is still live via GET /openrouter/v1/models, its
-        # free catalog rotates. Free-model requests are always $0 even on
-        # an unfunded account (no billing needed at all), so the only
-        # real constraint here is the rate limit below, not spend risk.
-        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        # free catalog rotates fast (llama-3.3-70b-instruct:free, an
+        # earlier choice here, was already pulled from the free tier by
+        # the time this was tested live). Free-model requests are always
+        # $0 even on an unfunded account (no billing needed at all), so
+        # the only real constraint here is the rate limit below, not
+        # spend risk. Confirmed live 2026-08-23.
+        "default_model": "nvidia/nemotron-3-super-120b-a12b:free",
         # OpenRouter's documented free-tier limits for an unfunded
         # account: 20 req/min (shared across all :free models, does not
         # change with credit balance) and 50 req/day (rises to 1000/day

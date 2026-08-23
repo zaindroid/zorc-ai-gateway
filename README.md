@@ -131,9 +131,12 @@ code changes needed, the proxy route itself is entirely table-driven.
 
 ## OpenRouter: models + free-tier enforcement
 
-`meta-llama/llama-3.3-70b-instruct:free` is the default -- confirm it's
-still in OpenRouter's free catalog via `GET /openrouter/v1/models`
-(filter for `":free"` model ids), the free lineup rotates. Like `google`,
+`nvidia/nemotron-3-super-120b-a12b:free` is the default -- confirmed
+live 2026-08-23 (real "pong" back, `cost: 0`). An earlier choice here,
+`meta-llama/llama-3.3-70b-instruct:free`, was already pulled from the
+free tier by the time it got tested live -- OpenRouter's free catalog
+rotates fast, always confirm via `GET /openrouter/v1/models` (filter for
+`":free"` model ids) rather than trusting this doc. Like `google`,
 it's rate-limited by this gateway (`rpm_limit`/`rpd_limit` on the
 `openrouter` entry in `PROVIDERS`, defaults 20/min & 50/day --
 OpenRouter's own documented unfunded-account limits, raise
