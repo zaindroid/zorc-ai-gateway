@@ -91,7 +91,14 @@ Add one entry to `PROVIDERS` in `main.py` (upstream base URL, the env var
 name for its key, how the key gets attached to the request) -- no other
 code changes needed, the proxy route itself is entirely table-driven.
 
-## Google AI Studio: free-tier enforcement
+## Google AI Studio: models + free-tier enforcement
+
+Confirmed live 2026-08-23: `gemini-2.5-flash` is no longer available to
+new users/keys -- Google's own error message says to use
+`gemini-3.6-flash` instead. Like the Groq reasoning models above, it can
+burn `max_tokens` on internal thinking (`extra_content.google.thought_signature`)
+before any visible `content` -- give it real headroom (200+) or you get
+`finish_reason: "length"` with an empty message, confirmed live.
 
 `google` is the one provider where staying free actually matters (Groq's
 free tier is generous and unlimited-in-practice for this use case;
