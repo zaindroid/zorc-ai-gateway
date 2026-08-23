@@ -57,6 +57,12 @@ PROVIDERS = {
         "api_key_env": "GOOGLE_AI_STUDIO_API_KEY",
         "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
     },
+    "xai": {
+        # Grok, OpenAI-compatible API.
+        "base_url": "https://api.x.ai/v1",
+        "api_key_env": "XAI_API_KEY",
+        "auth_header": lambda key: {"Authorization": f"Bearer {key}"},
+    },
 }
 
 

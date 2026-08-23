@@ -64,6 +64,7 @@ def test_providers_reflects_which_keys_are_set(monkeypatch):
     assert status["groq"] is True
     assert status["together"] is False
     assert status["google"] is False
+    assert status["xai"] is False
 
 
 def test_unknown_provider_404s():

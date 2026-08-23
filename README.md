@@ -1,7 +1,7 @@
 # zorc-ai-gateway
 
 Internal OpenAI-compatible reverse proxy to free-tier AI providers
-(Groq, Together AI, Google AI Studio). Holds the real provider API keys
+(Groq, Together AI, Google AI Studio, xAI Grok). Holds the real provider API keys
 so no other app on the zorc platform ever needs to see or handle one
 directly.
 
@@ -15,6 +15,7 @@ wants:
 http://<gateway internal address>:8080/groq/v1/chat/completions
 http://<gateway internal address>:8080/together/v1/chat/completions
 http://<gateway internal address>:8080/google/v1/chat/completions
+http://<gateway internal address>:8080/xai/v1/chat/completions
 ```
 
 The gateway injects the real `Authorization` header for that provider
@@ -42,9 +43,10 @@ key, or mark them `required: true`, which would block deployment until
 all three are ready). Instead:
 
 - The app reads `GROQ_API_KEY` / `TOGETHER_API_KEY` /
-  `GOOGLE_AI_STUDIO_API_KEY` from the environment directly, treating an
-  unset one as "not configured yet" -- that provider's routes return a
-  clean `503`, every other provider keeps working.
+  `GOOGLE_AI_STUDIO_API_KEY` / `XAI_API_KEY` from the environment
+  directly, treating an unset one as "not configured yet" -- that
+  provider's routes return a clean `503`, every other provider keeps
+  working.
 - `GET /providers` reports which ones currently have a real key set.
 - Wiring a key in later is a direct Coolify env-var update + restart
   against this app's UUID -- not yet a standalone zorc tool, done the
