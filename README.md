@@ -90,6 +90,22 @@ Direct `/{provider}/...` routes are completely unaffected by any of this
 -- they always attempt the real call with the model you actually sent,
 exactly as before /auto existed.
 
+## Internal address
+
+Reachable on the `coolify` Docker network at `http://ai-gateway-internal:8080`
+-- a stable Coolify `custom_network_aliases` entry, not the raw container
+name (`i12lvdfniy5ohtz66qu1oaw5-<per-deploy suffix>`), which changes on
+every single redeploy (confirmed live across many redeploys this
+session). Confirmed live 2026-08-23 that the alias survives a redeploy
+unchanged while the raw container name changes underneath it -- this is
+what makes it safe for another app's `deploy()` to hardcode/reference
+this gateway's address going forward. If this app is ever recreated from
+scratch (not just redeployed), the `custom_network_aliases` field needs
+to be set again: `PATCH /applications/{uuid}` with
+`{"custom_network_aliases": "ai-gateway-internal"}`, then a redeploy to
+apply it to the running container (same "config change needs a
+recreate" rule as env vars and memory limits).
+
 ## Trust boundary
 
 **This app is never publicly reachable.** It's deployed via zorc's normal
